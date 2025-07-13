@@ -67,9 +67,9 @@ def execute_buy(symbol: str) -> dict:
         monitor_state["entry_price"] = entry_price
         logger.info(f"Entry LONG: {executed_qty}@{entry_price}")
 
-        # 6. TP1 설정 (0.5%)
-        tp1_price = round_step_size(entry_price * 1.005, tick_size, round_up=True)
-        tp1_qty   = round_step_size(executed_qty * 0.30, step_size)
+        # 6. TP1 설정 (0.3%)
+        tp1_price = round_step_size(entry_price * 1.003, tick_size, round_up=True)
+        tp1_qty   = round_step_size(executed_qty * 0.20, step_size)
 
         tp1 = client.mix_place_plan_order(
             symbol=symbol,
@@ -82,10 +82,10 @@ def execute_buy(symbol: str) -> dict:
             orderType="market"
         )
 
-        # 7. TP2 설정 (1.1%)
+        # 7. TP2 설정 (0.7%)
         remain_after_tp1 = executed_qty - tp1_qty
         tp2_qty = round_step_size(remain_after_tp1 * 0.50, step_size)
-        tp2_price = round_step_size(entry_price * 1.011, tick_size, round_up=True)
+        tp2_price = round_step_size(entry_price * 1.007, tick_size, round_up=True)
 
         tp2 = client.mix_place_plan_order(
             symbol=symbol,
@@ -98,8 +98,8 @@ def execute_buy(symbol: str) -> dict:
             orderType="market"
         )
 
-        # 8. SL 설정 (손절 -0.5%)
-        sl_price = round_step_size(entry_price * 0.995, tick_size)
+        # 8. SL 설정 (손절 -0.3%)
+        sl_price = round_step_size(entry_price * 0.997, tick_size)
         sl = client.mix_place_plan_order(
             symbol=symbol,
             marginCoin="USDT",
