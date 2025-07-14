@@ -7,9 +7,7 @@ EX_API_KEY = os.getenv("EX_API_KEY")
 EX_API_SECRET = os.getenv("EX_API_SECRET")
 EX_API_PASSPHRASE = os.getenv("EX_API_PASSPHRASE")
 
-# DRY_RUN 설정
+# ✅ 추가해야 할 항목
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
-
-# 대기 시간 설정
-POLL_INTERVAL = 1
-MAX_WAIT = 30
+POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", 1.0))   # 기본값 1초
+MAX_WAIT = int(os.getenv("MAX_WAIT", 10))                # 기본값 10초
