@@ -20,13 +20,12 @@ def get_bitget_client() -> Client:
             logger.error("Bitget API 키/시크릿/패스프레이즈가 .env에 설정되지 않았습니다.")
             raise RuntimeError("Missing Bitget API credentials.")
 
-        # 위치 인자로 수정
+        # base_url 제거 (이 인자는 지원되지 않음)
         _bitget_client = Client(
             EX_API_KEY,
             EX_API_SECRET,
             EX_API_PASSPHRASE,
-            use_server_time=True,
-            base_url="https://api.bitget.com"
+            use_server_time=True
         )
         logger.info("Initialized live Bitget Client.")
 
