@@ -3,11 +3,7 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.clients.bitget_client import (
-    get_mix_account_client,
-    get_mix_order_client,
-    get_mix_position_client
-)
+from app.clients.bitget_client import get_bitget_client
 from app.config import DRY_RUN, POLL_INTERVAL, MAX_WAIT
 from app.services.buy import execute_buy
 from app.services.sell import execute_sell
@@ -16,20 +12,14 @@ from app.state import monitor_state
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-PRODUCT_TYPE = "umcbl"
-
 def _wait_for(symbol: str, target_amt: float) -> bool:
-    position_client = get_mix_position_client()
+    client = get_bitget_client()
     start = time.time()
-    current = 0.0
+    current = None
 
     while time.time() - start < MAX_WAIT:
-        data = position_client.get_position(symbol=symbol, productType=PRODUCT_TYPE)
-        positions = data.get("data", [])
-        for p in positions:
-            if p.get("symbol") == symbol:
-                current = float(p.get("holdVol", 0))
-                break
+        positions = client.mix_get_account(symbol=symbol, productType="umcbl")
+        current = next((float(p["holdVol"]) for p in positions["data"] if p["symbol"] == symbol), 0.0)
 
         if target_amt > 0 and current > 0:
             return True
@@ -44,17 +34,15 @@ def _wait_for(symbol: str, target_amt: float) -> bool:
     return False
 
 def _cancel_open_reduceonly_orders(symbol: str):
-    order_client = get_mix_order_client()
-    orders = order_client.get_all_open_orders(productType=PRODUCT_TYPE, symbol=symbol)
+    client = get_bitget_client()
+    orders = client.mix_get_all_open_orders(productType="umcbl", symbol=symbol)
     for order in orders.get("data", []):
         if order.get("reduceOnly"):
-            order_client.cancel_order(symbol=symbol, orderId=order["orderId"], productType=PRODUCT_TYPE)
+            client.mix_cancel_order(symbol=symbol, orderId=order["orderId"], productType="umcbl")
             logger.info(f"[Cleanup] Canceled reduceOnly order {order['orderId']}")
 
 def switch_position(symbol: str, action: str) -> dict:
-    account_client = get_mix_account_client()
-    order_client = get_mix_order_client()
-    position_client = get_mix_position_client()
+    client = get_bitget_client()
 
     if DRY_RUN:
         logger.info(f"[DRY_RUN] switch_position {action} {symbol}")
@@ -63,8 +51,8 @@ def switch_position(symbol: str, action: str) -> dict:
     monitor_state["trade_count"] += 1
     monitor_state["sl_triggered"] = False
 
-    acc_data = account_client.get_account(symbol=symbol, productType=PRODUCT_TYPE)
-    current_amt = next((float(p["marginAmount"]) for p in acc_data["data"] if p["symbol"] == symbol), 0.0)
+    account_info = client.mix_get_account(symbol=symbol, productType="umcbl")
+    current_amt = next((float(p["holdVol"]) for p in account_info["data"] if p["symbol"] == symbol), 0.0)
 
     if action.upper() == "BUY":
         if current_amt > 0:
@@ -73,12 +61,12 @@ def switch_position(symbol: str, action: str) -> dict:
         if current_amt < 0:
             qty = abs(current_amt)
             logger.info(f"Closing SHORT {qty} @ market for {symbol}")
-            order_client.place_market_order(
+            client.mix_place_order(
                 symbol=symbol,
-                productType=PRODUCT_TYPE,
-                marginCoin="USDT",
-                size=str(qty),
+                productType="umcbl",
+                orderType="market",
                 side="buy",
+                size=str(qty),
                 reduceOnly=True
             )
             if not _wait_for(symbol, 0.0):
@@ -87,6 +75,19 @@ def switch_position(symbol: str, action: str) -> dict:
             if monitor_state.get("sl_triggered", False):
                 logger.info(f"[Switch] SL-triggered close → cleaning up TP/SL")
                 _cancel_open_reduceonly_orders(symbol)
+
+            try:
+                entry = monitor_state.get("entry_price", 0.0)
+                ticker = client.mix_get_ticker(symbol=symbol, productType="umcbl")
+                cur_price = float(ticker["data"]["last"])
+                pnl = (cur_price / entry - 1) * 100
+                if pnl < 0:
+                    monitor_state["sl_count"] += 1
+                    monitor_state["daily_pnl"] += pnl
+                    now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
+                    logger.info(f"Stop-loss on switch SHORT→LONG: {pnl:.2f}% at {now}")
+            except Exception:
+                logger.exception("Failed to calc SL PnL on short close")
 
         return execute_buy(symbol)
 
@@ -97,12 +98,12 @@ def switch_position(symbol: str, action: str) -> dict:
         if current_amt > 0:
             qty = abs(current_amt)
             logger.info(f"Closing LONG {qty} @ market for {symbol}")
-            order_client.place_market_order(
+            client.mix_place_order(
                 symbol=symbol,
-                productType=PRODUCT_TYPE,
-                marginCoin="USDT",
-                size=str(qty),
+                productType="umcbl",
+                orderType="market",
                 side="sell",
+                size=str(qty),
                 reduceOnly=True
             )
             if not _wait_for(symbol, 0.0):
@@ -111,6 +112,19 @@ def switch_position(symbol: str, action: str) -> dict:
             if monitor_state.get("sl_triggered", False):
                 logger.info(f"[Switch] SL-triggered close → cleaning up TP/SL")
                 _cancel_open_reduceonly_orders(symbol)
+
+            try:
+                entry = monitor_state.get("entry_price", 0.0)
+                ticker = client.mix_get_ticker(symbol=symbol, productType="umcbl")
+                cur_price = float(ticker["data"]["last"])
+                pnl = (entry / cur_price - 1) * 100
+                if pnl < 0:
+                    monitor_state["sl_count"] += 1
+                    monitor_state["daily_pnl"] += pnl
+                    now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
+                    logger.info(f"Stop-loss on switch LONG→SHORT: {pnl:.2f}% at {now}")
+            except Exception:
+                logger.exception("Failed to calc SL PnL on long close")
 
         return execute_sell(symbol)
 
