@@ -24,7 +24,7 @@ def get_bitget_client() -> Client:
 
         _bitget_client = Client(
             api_key=EX_API_KEY,
-            api_secret=EX_API_SECRET,
+            secret_key=EX_API_SECRET,
             passphrase=EX_API_PASSPHRASE,
             use_server_time=True,
             base_url="https://api.bitget.com"
