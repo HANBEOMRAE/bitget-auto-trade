@@ -1,10 +1,12 @@
-# app/services/buy.py
-
 import logging
 import math
 from app.clients.bitget_client import get_bitget_client
 from app.config import DRY_RUN, TRADE_LEVERAGE
 from app.state import monitor_state
+
+from bitget.apis.mix.v1.mix_account_api import MixAccountApi
+from bitget.apis.mix.v1.mix_market_api import MixMarketApi
+from bitget.apis.mix.v1.mix_order_api import MixOrderApi
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -12,10 +14,7 @@ logger.setLevel(logging.INFO)
 def round_step_size(value: float, step_size: float, round_up=False) -> float:
     precision = int(round(-math.log10(step_size), 0))
     factor = 10 ** precision
-    if round_up:
-        return math.ceil(value * factor) / factor
-    else:
-        return math.floor(value * factor) / factor
+    return math.ceil(value * factor) / factor if round_up else math.floor(value * factor) / factor
 
 def execute_buy(symbol: str) -> dict:
     client = get_bitget_client()
@@ -25,25 +24,35 @@ def execute_buy(symbol: str) -> dict:
         return {"skipped": "dry_run"}
 
     try:
-        # 1. 레버리지 설정
-        client.mix_set_leverage(symbol=symbol, marginCoin="USDT", leverage=TRADE_LEVERAGE)
+        # API 객체 초기화
+        account_api = MixAccountApi(client)
+        market_api = MixMarketApi(client)
+        order_api = MixOrderApi(client)
 
-        # 2. USDT 잔고 및 마크가격 확인
-        accounts = client.mix_get_account(symbol=symbol, productType="umcbl")
-        usdt_balance = float(accounts["marginCoinAccount"]["available"])
-        mark_price = float(client.mix_get_market_price(symbol=symbol)["price"])
+        margin_coin = "USDT"
+        product_type = "umcbl"
+
+        # 1. 레버리지 설정
+        account_api.set_leverage(symbol, margin_coin, TRADE_LEVERAGE)
+
+        # 2. 잔고 및 마크가격 확인
+        account = account_api.get_account(symbol, product_type)
+        usdt_balance = float(account["data"]["marginCoinAccount"]["available"])
+
+        price = market_api.get_mark_price(symbol)
+        mark_price = float(price["data"]["markPrice"])
 
         # 3. 주문 수량 계산
         allocation = usdt_balance * 0.98 * TRADE_LEVERAGE
         raw_qty = allocation / mark_price
 
-        # 4. 심볼의 최소 수량 필터 확인
-        info = client.mix_get_symbols(productType="umcbl")
+        # 4. 최소 수량 필터 확인
+        info = market_api.get_symbols(product_type)
         sym_info = next(s for s in info["data"] if s["symbol"] == symbol)
+
         min_qty = float(sym_info["minTradeNum"])
         price_scale = int(sym_info["priceScale"])
         size_scale = int(sym_info["sizeScale"])
-
         step_size = 10 ** -size_scale
         tick_size = 10 ** -price_scale
 
@@ -52,28 +61,28 @@ def execute_buy(symbol: str) -> dict:
             logger.warning(f"Qty {qty} < minQty {min_qty}. Skipping BUY.")
             return {"skipped": "quantity_too_low"}
 
-        # 5. 시장가 매수 진입
-        order = client.mix_place_order(
+        # 5. 시장가 매수
+        order = order_api.place_order(
             symbol=symbol,
-            marginCoin="USDT",
+            marginCoin=margin_coin,
+            size=str(qty),
             side="open_long",
-            orderType="market",
-            size=str(qty)
+            orderType="market"
         )
         logger.info(f"Market BUY submitted: {order}")
 
-        entry_price = mark_price  # Bitget은 실체결가 별도 조회 어려움 → 마크가 사용
+        entry_price = mark_price
         executed_qty = qty
         monitor_state["entry_price"] = entry_price
         logger.info(f"Entry LONG: {executed_qty}@{entry_price}")
 
-        # 6. TP1 설정 (0.3%)
+        # 6. TP1
         tp1_price = round_step_size(entry_price * 1.003, tick_size, round_up=True)
         tp1_qty   = round_step_size(executed_qty * 0.20, step_size)
 
-        tp1 = client.mix_place_plan_order(
+        tp1 = order_api.place_plan_order(
             symbol=symbol,
-            marginCoin="USDT",
+            marginCoin=margin_coin,
             size=str(tp1_qty),
             side="close_long",
             triggerPrice=str(tp1_price),
@@ -82,14 +91,14 @@ def execute_buy(symbol: str) -> dict:
             orderType="market"
         )
 
-        # 7. TP2 설정 (0.7%)
+        # 7. TP2
         remain_after_tp1 = executed_qty - tp1_qty
         tp2_qty = round_step_size(remain_after_tp1 * 0.50, step_size)
         tp2_price = round_step_size(entry_price * 1.007, tick_size, round_up=True)
 
-        tp2 = client.mix_place_plan_order(
+        tp2 = order_api.place_plan_order(
             symbol=symbol,
-            marginCoin="USDT",
+            marginCoin=margin_coin,
             size=str(tp2_qty),
             side="close_long",
             triggerPrice=str(tp2_price),
@@ -98,11 +107,11 @@ def execute_buy(symbol: str) -> dict:
             orderType="market"
         )
 
-        # 8. SL 설정 (손절 -0.3%)
+        # 8. SL
         sl_price = round_step_size(entry_price * 0.997, tick_size)
-        sl = client.mix_place_plan_order(
+        sl = order_api.place_plan_order(
             symbol=symbol,
-            marginCoin="USDT",
+            marginCoin=margin_coin,
             size=str(executed_qty),
             side="close_long",
             triggerPrice=str(sl_price),

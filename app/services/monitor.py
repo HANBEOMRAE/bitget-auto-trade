@@ -2,6 +2,9 @@ import time
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from threading import Thread
+
+from bitget.apis.mix.v1.mix_market_api import MixMarketApi
 from app.clients.bitget_client import get_bitget_client
 from app.state import monitor_state
 from app.config import POLL_INTERVAL
@@ -12,13 +15,13 @@ logger.setLevel(logging.INFO)
 
 def _poll_price_loop():
     client = get_bitget_client()
-    symbol = monitor_state.get("symbol")
+    market_api = MixMarketApi(client)
 
+    symbol = monitor_state.get("symbol")
     if not symbol:
         logger.warning("모니터 시작 전 symbol이 설정되지 않았습니다.")
         return
 
-    # ✅ productType은 사용자의 선물 유형에 따라 고정 또는 설정에서 가져올 수 있음
     product_type = "umcbl"  # USDT-M 선물 기준
 
     while True:
@@ -27,9 +30,10 @@ def _poll_price_loop():
             entry_price = monitor_state.get("entry_price", 0)
 
             if qty > 0 and entry_price > 0:
-                # ✅ 티커 정보 조회 (python-bitget 기준)
-                ticker = client.mix_get_market_ticker(symbol=symbol, product_type=product_type)
+                # ✅ 공식 SDK 사용
+                ticker = market_api.get_ticker(symbol=symbol, productType=product_type)
                 current_price = float(ticker["data"]["last"])
+
                 pnl = (current_price / entry_price - 1) * 100
                 now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -50,6 +54,5 @@ def _poll_price_loop():
 
 def start_monitor():
     logger.info("Bitget 가격 모니터 시작")
-    from threading import Thread
     thread = Thread(target=_poll_price_loop, daemon=True)
     thread.start()

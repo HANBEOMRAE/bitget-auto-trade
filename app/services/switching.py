@@ -3,6 +3,10 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from bitget.apis.mix.v1.mix_account_api import MixAccountApi
+from bitget.apis.mix.v1.mix_order_api import MixOrderApi
+from bitget.apis.mix.v1.mix_market_api import MixMarketApi
+
 from app.clients.bitget_client import get_bitget_client
 from app.config import DRY_RUN, POLL_INTERVAL, MAX_WAIT
 from app.services.buy import execute_buy
@@ -14,11 +18,11 @@ logger.setLevel(logging.INFO)
 
 def _wait_for(symbol: str, target_amt: float) -> bool:
     client = get_bitget_client()
-    start = time.time()
-    current = None
+    account_api = MixAccountApi(client)
 
+    start = time.time()
     while time.time() - start < MAX_WAIT:
-        positions = client.mix_get_account(symbol=symbol, productType="umcbl")
+        positions = account_api.get_account(symbol, productType="umcbl")
         current = next((float(p["holdVol"]) for p in positions["data"] if p["symbol"] == symbol), 0.0)
 
         if target_amt > 0 and current > 0:
@@ -35,14 +39,18 @@ def _wait_for(symbol: str, target_amt: float) -> bool:
 
 def _cancel_open_reduceonly_orders(symbol: str):
     client = get_bitget_client()
-    orders = client.mix_get_all_open_orders(productType="umcbl", symbol=symbol)
+    order_api = MixOrderApi(client)
+    orders = order_api.get_all_open_orders(symbol=symbol, productType="umcbl")
     for order in orders.get("data", []):
         if order.get("reduceOnly"):
-            client.mix_cancel_order(symbol=symbol, orderId=order["orderId"], productType="umcbl")
+            order_api.cancel_order(symbol=symbol, orderId=order["orderId"], productType="umcbl")
             logger.info(f"[Cleanup] Canceled reduceOnly order {order['orderId']}")
 
 def switch_position(symbol: str, action: str) -> dict:
     client = get_bitget_client()
+    account_api = MixAccountApi(client)
+    order_api = MixOrderApi(client)
+    market_api = MixMarketApi(client)
 
     if DRY_RUN:
         logger.info(f"[DRY_RUN] switch_position {action} {symbol}")
@@ -51,7 +59,7 @@ def switch_position(symbol: str, action: str) -> dict:
     monitor_state["trade_count"] += 1
     monitor_state["sl_triggered"] = False
 
-    account_info = client.mix_get_account(symbol=symbol, productType="umcbl")
+    account_info = account_api.get_account(symbol=symbol, productType="umcbl")
     current_amt = next((float(p["holdVol"]) for p in account_info["data"] if p["symbol"] == symbol), 0.0)
 
     if action.upper() == "BUY":
@@ -61,7 +69,7 @@ def switch_position(symbol: str, action: str) -> dict:
         if current_amt < 0:
             qty = abs(current_amt)
             logger.info(f"Closing SHORT {qty} @ market for {symbol}")
-            client.mix_place_order(
+            order_api.place_order(
                 symbol=symbol,
                 productType="umcbl",
                 orderType="market",
@@ -69,6 +77,7 @@ def switch_position(symbol: str, action: str) -> dict:
                 size=str(qty),
                 reduceOnly=True
             )
+
             if not _wait_for(symbol, 0.0):
                 return {"skipped": "close_failed"}
 
@@ -78,7 +87,7 @@ def switch_position(symbol: str, action: str) -> dict:
 
             try:
                 entry = monitor_state.get("entry_price", 0.0)
-                ticker = client.mix_get_ticker(symbol=symbol, productType="umcbl")
+                ticker = market_api.get_ticker(symbol=symbol, productType="umcbl")
                 cur_price = float(ticker["data"]["last"])
                 pnl = (cur_price / entry - 1) * 100
                 if pnl < 0:
@@ -98,7 +107,7 @@ def switch_position(symbol: str, action: str) -> dict:
         if current_amt > 0:
             qty = abs(current_amt)
             logger.info(f"Closing LONG {qty} @ market for {symbol}")
-            client.mix_place_order(
+            order_api.place_order(
                 symbol=symbol,
                 productType="umcbl",
                 orderType="market",
@@ -106,6 +115,7 @@ def switch_position(symbol: str, action: str) -> dict:
                 size=str(qty),
                 reduceOnly=True
             )
+
             if not _wait_for(symbol, 0.0):
                 return {"skipped": "close_failed"}
 
@@ -115,7 +125,7 @@ def switch_position(symbol: str, action: str) -> dict:
 
             try:
                 entry = monitor_state.get("entry_price", 0.0)
-                ticker = client.mix_get_ticker(symbol=symbol, productType="umcbl")
+                ticker = market_api.get_ticker(symbol=symbol, productType="umcbl")
                 cur_price = float(ticker["data"]["last"])
                 pnl = (entry / cur_price - 1) * 100
                 if pnl < 0:
