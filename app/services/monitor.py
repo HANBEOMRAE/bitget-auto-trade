@@ -1,5 +1,3 @@
-# app/services/monitor.py
-
 import time
 import logging
 from datetime import datetime
@@ -20,14 +18,18 @@ def _poll_price_loop():
         logger.warning("모니터 시작 전 symbol이 설정되지 않았습니다.")
         return
 
+    # ✅ productType은 사용자의 선물 유형에 따라 고정 또는 설정에서 가져올 수 있음
+    product_type = "umcbl"  # USDT-M 선물 기준
+
     while True:
         try:
             qty = monitor_state.get("position_qty", 0)
             entry_price = monitor_state.get("entry_price", 0)
 
             if qty > 0 and entry_price > 0:
-                ticker = client.mix_get_market_price(symbol=symbol)
-                current_price = float(ticker["price"])
+                # ✅ 티커 정보 조회 (python-bitget 기준)
+                ticker = client.mix_get_market_ticker(symbol=symbol, product_type=product_type)
+                current_price = float(ticker["data"]["last"])
                 pnl = (current_price / entry_price - 1) * 100
                 now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
 
