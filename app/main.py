@@ -7,10 +7,9 @@ import logging
 from app.services.monitor import start_monitor
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 app = FastAPI()
+
 
 @app.on_event("startup")
 def on_startup():
@@ -24,21 +23,24 @@ def on_startup():
             start_monitor()
         except Exception:
             logging.getLogger("monitor").exception("Bitget 모니터링 실패")
-    
-    # 백그라운드 모니터링 스레드 시작
+
     thread = threading.Thread(target=safe_monitor, daemon=True)
     thread.start()
 
-    # APScheduler로 일일 리포트 실행 예약 (원할 경우 사용)
     # from app.routers.report import report
     # sched = BackgroundScheduler(timezone="Asia/Seoul")
     # sched.add_job(lambda: report(), 'cron', hour=9, minute=0)
     # sched.start()
 
-# 웹훅 라우터 등록 (TradingView 신호 처리)
+
 app.include_router(webhook_router)
 
-# 헬스체크 API
 @app.get("/health")
 def health():
     return {"status": "alive"}
+
+
+# ✅ FastAPI 앱 실행을 위한 코드 추가 (직접 실행 시에만)
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000)
