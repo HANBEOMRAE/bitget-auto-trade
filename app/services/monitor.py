@@ -4,7 +4,6 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from threading import Thread
 
-from bitget.apis.mix.v1.mix_market_api import MixMarketApi
 from app.clients.bitget_client import get_bitget_client
 from app.state import monitor_state
 from app.config import POLL_INTERVAL
@@ -12,17 +11,15 @@ from app.config import POLL_INTERVAL
 logger = logging.getLogger("monitor")
 logger.setLevel(logging.INFO)
 
+product_type = "umcbl"  # USDT-M 선물 기준
 
 def _poll_price_loop():
     client = get_bitget_client()
-    market_api = MixMarketApi(client)
 
     symbol = monitor_state.get("symbol")
     if not symbol:
         logger.warning("모니터 시작 전 symbol이 설정되지 않았습니다.")
         return
-
-    product_type = "umcbl"  # USDT-M 선물 기준
 
     while True:
         try:
@@ -30,8 +27,8 @@ def _poll_price_loop():
             entry_price = monitor_state.get("entry_price", 0)
 
             if qty > 0 and entry_price > 0:
-                # ✅ 공식 SDK 사용
-                ticker = market_api.get_ticker(symbol=symbol, productType=product_type)
+                # ✅ 공식 SDK의 mix_market_api 사용
+                ticker = client.mix_market_api.get_ticker(symbol=symbol, productType=product_type)
                 current_price = float(ticker["data"]["last"])
 
                 pnl = (current_price / entry_price - 1) * 100
@@ -50,7 +47,6 @@ def _poll_price_loop():
         except Exception as e:
             logger.exception(f"가격 모니터링 중 오류 발생: {e}")
             time.sleep(POLL_INTERVAL)
-
 
 def start_monitor():
     logger.info("Bitget 가격 모니터 시작")

@@ -4,136 +4,116 @@ from app.clients.bitget_client import get_bitget_client
 from app.config import DRY_RUN, TRADE_LEVERAGE
 from app.state import monitor_state
 
-from bitget.apis.mix.v1.mix_account_api import MixAccountApi
-from bitget.apis.mix.v1.mix_market_api import MixMarketApi
-from bitget.apis.mix.v1.mix_order_api import MixOrderApi
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
 
 def round_step_size(value: float, step_size: float, round_up=False) -> float:
     precision = int(round(-math.log10(step_size), 0))
     factor = 10 ** precision
     return math.ceil(value * factor) / factor if round_up else math.floor(value * factor) / factor
 
+
 def execute_sell(symbol: str) -> dict:
     client = get_bitget_client()
+    margin_coin = "USDT"
+    product_type = "umcbl"
 
     if DRY_RUN:
         logger.info(f"[DRY_RUN] SELL {symbol}")
         return {"skipped": "dry_run"}
 
     try:
-        # Bitget API 초기화
-        account_api = MixAccountApi(client)
-        market_api = MixMarketApi(client)
-        order_api = MixOrderApi(client)
-
-        margin_coin = "USDT"
-        product_type = "umcbl"
-
         # 1. 레버리지 설정
-        account_api.set_leverage(symbol, margin_coin, TRADE_LEVERAGE)
+        client.mix_account_api.set_leverage(symbol=symbol, marginCoin=margin_coin, leverage=TRADE_LEVERAGE)
 
-        # 2. 자산 및 마크가격 조회
-        account = account_api.get_account(symbol, product_type)
-        usdt_balance = float(account["data"]["marginCoinAccount"]["available"])
+        # 2. 잔고 조회
+        account = client.mix_account_api.get_account(symbol=symbol, productType=product_type)
+        usdt_balance = float(account["data"]["available"])
 
-        mark = market_api.get_mark_price(symbol)
-        mark_price = float(mark["data"]["markPrice"])
+        # 3. 현재 마크가격 조회
+        ticker = client.mix_market_api.get_ticker(productType=product_type, symbol=symbol)
+        mark_price = float(ticker["data"]["last"])
 
-        # 3. 수량 계산
-        allocation = usdt_balance * 0.98 * TRADE_LEVERAGE
-        raw_qty = allocation / mark_price
+        # 4. 심볼 정보 조회
+        symbols_info = client.mix_market_api.get_all_symbols(productType=product_type)
+        symbol_info = next(item for item in symbols_info["data"] if item["symbol"] == symbol)
+        min_qty = float(symbol_info["minTradeNum"])
+        tick_size = 10 ** -int(symbol_info["priceScale"])
+        step_size = 10 ** -int(symbol_info["sizeScale"])
 
-        # 4. 최소 수량/단위 확인
-        info = market_api.get_symbols(product_type)
-        sym_info = next(s for s in info["data"] if s["symbol"] == symbol)
-
-        min_qty = float(sym_info["minTradeNum"])
-        price_scale = int(sym_info["priceScale"])
-        size_scale = int(sym_info["sizeScale"])
-        step_size = 10 ** -size_scale
-        tick_size = 10 ** -price_scale
-
+        # 5. 수량 계산
+        alloc = usdt_balance * 0.98 * TRADE_LEVERAGE
+        raw_qty = alloc / mark_price
         qty = round_step_size(raw_qty, step_size)
-        if qty < min_qty:
-            logger.warning(f"Qty {qty} < minQty {min_qty}. Skipping SELL.")
-            return {"skipped": "quantity_too_low"}
 
-        # 5. 시장가 숏 진입
-        order = order_api.place_order(
+        if qty < min_qty:
+            logger.warning(f"SELL Skipped: qty {qty} < min {min_qty}")
+            return {"skipped": "qty_too_low"}
+
+        # 6. 시장가 숏 진입
+        res = client.mix_order_api.place_order(
             symbol=symbol,
             marginCoin=margin_coin,
             size=str(qty),
             side="open_short",
             orderType="market"
         )
-        logger.info(f"Market SELL submitted: {order}")
+        logger.info(f"[SELL] Market order submitted: {res}")
 
-        entry_price = mark_price
-        executed_qty = qty
-        monitor_state["entry_price"] = entry_price
-        logger.info(f"Entry SHORT: {executed_qty}@{entry_price}")
+        # 7. 모니터 상태 업데이트
+        monitor_state["entry_price"] = mark_price
+        monitor_state["position_qty"] = qty
 
-        # 6. TP1 설정 (+0.3% 수익 → 가격 0.997배)
-        tp1_price = round_step_size(entry_price * 0.997, tick_size, round_up=True)
-        tp1_qty = round_step_size(executed_qty * 0.20, step_size)
+        # 8. 익절 및 손절 설정
+        tp1_price = round_step_size(mark_price * 0.997, tick_size, round_up=True)
+        tp1_qty = round_step_size(qty * 0.2, step_size)
 
-        tp1 = order_api.place_plan_order(
+        tp2_price = round_step_size(mark_price * 0.993, tick_size, round_up=True)
+        tp2_qty = round_step_size((qty - tp1_qty) * 0.5, step_size)
+
+        sl_price = round_step_size(mark_price * 1.003, tick_size)
+
+        tp1 = client.mix_order_api.place_plan_order(
             symbol=symbol,
             marginCoin=margin_coin,
             size=str(tp1_qty),
             side="close_short",
+            orderType="market",
             triggerPrice=str(tp1_price),
             executePrice=str(tp1_price),
-            triggerType="market_price",
-            orderType="market"
+            triggerType="market_price"
         )
 
-        # 7. TP2 설정 (+0.7% 수익 → 가격 0.993배)
-        remain_after_tp1 = executed_qty - tp1_qty
-        tp2_qty = round_step_size(remain_after_tp1 * 0.50, step_size)
-        tp2_price = round_step_size(entry_price * 0.993, tick_size, round_up=True)
-
-        tp2 = order_api.place_plan_order(
+        tp2 = client.mix_order_api.place_plan_order(
             symbol=symbol,
             marginCoin=margin_coin,
             size=str(tp2_qty),
             side="close_short",
+            orderType="market",
             triggerPrice=str(tp2_price),
             executePrice=str(tp2_price),
-            triggerType="market_price",
-            orderType="market"
+            triggerType="market_price"
         )
 
-        # 8. SL 설정 (-0.3% 손실 → 가격 1.003배)
-        sl_price = round_step_size(entry_price * 1.003, tick_size)
-
-        sl = order_api.place_plan_order(
+        sl = client.mix_order_api.place_plan_order(
             symbol=symbol,
             marginCoin=margin_coin,
-            size=str(executed_qty),
+            size=str(qty),
             side="close_short",
+            orderType="market",
             triggerPrice=str(sl_price),
             executePrice=str(sl_price),
-            triggerType="market_price",
-            orderType="market"
+            triggerType="market_price"
         )
 
         logger.info(
-            f"TP1 @ {tp1_price} x{tp1_qty}, "
-            f"TP2 @ {tp2_price} x{tp2_qty}, "
-            f"SL  @ {sl_price} x{executed_qty}"
+            f"[TP/SL] TP1: {tp1_price} x{tp1_qty}, TP2: {tp2_price} x{tp2_qty}, SL: {sl_price} x{qty}"
         )
 
         return {
-            "sell": {"filled": executed_qty, "entry": entry_price},
-            "orders": {
-                "tp1": tp1,
-                "tp2": tp2,
-                "sl":  sl
-            }
+            "sell": {"filled": qty, "entry": mark_price},
+            "orders": {"tp1": tp1, "tp2": tp2, "sl": sl}
         }
 
     except Exception as e:
